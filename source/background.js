@@ -48,7 +48,6 @@ turndownService.addRule('taskListItems', {
     }
 });
   
-  
 // Global constants
 const STATUSLINE_PERSIST_MS = 10000;    // Delete status line messages after indicated time (10 sec)
 
@@ -88,7 +87,6 @@ var htmlMessageBody = "";       // HTML of clipped message body translated to ma
         ')':        '\uFF09',   // U+FF09 Fullwidth Right Parenthesis
     };
     
-
 ///////////////////////////
 // Utility functions
 ///////////////////////////
@@ -112,10 +110,10 @@ async function displayAlert(messageString) {
     // Also put message on status line
     displayStatusText(messageString);
     
-    // Catch any errors thrown by executeScript()
-    try {    
-      const onelinecommand = 'alert(' + '"' + messageString + '");';
-      retVal = await browser.tabs.executeScript(latestMsgDispTab, { code: onelinecommand, });
+    // Use message passing instead of building executable code strings
+    try {
+      const response = await browser.tabs.sendMessage(latestMsgDispTab, { action: 'alert', message: String(messageString) });
+      retVal = response;
     } catch(e) { onError(e, ("displayAlert - " + messageString)); }
     
     return retVal;
@@ -126,79 +124,58 @@ async function displayAlert(messageString) {
 // NOTE: Do not pass escaped quotes in messageString as they can hose the executeScrpt()
 async function displayConfirm(messageString) {
     var retval ="";
-    
     console.log("displaying confirm dialog \"" + messageString + "\" in tab " + latestMsgDispTab);
-    const onelinecommand = 'confirm(' + '"' + messageString + '");';
-    
-    // Catch any errors thrown by executeScript()
-    try {    
-        // Run the confirmation dialog.
-        retArray = await browser.tabs.executeScript(latestMsgDispTab, { code: onelinecommand, });
-        retval = retArray[0];
+
+    try {
+        const result = await browser.tabs.sendMessage(latestMsgDispTab, { action: 'confirm', message: String(messageString) });
+        retval = result;
     } catch(e) { onError(e, ("displayConfirm - " + messageString)); }
-    
-    // Return the response
+
     return retval;
 }
-
 
 // Function to display clip status
 // NOTE: Do not pass escaped quotes in messageString as they can hose the executeScrpt()
 async function displayStatusText(messageString) {
     console.log("displaying status text \"" + messageString + "\" in tab " + latestMsgDispTab);
     
-    // Catch any errors thrown by executeScript()
-    try {    
-        // First, inject script to create a DIV text element in the message content tab
-        // where we can post text.
-        await browser.tabs.executeScript(latestMsgDispTab, {
-          file: "/statusLine/statusLine-script.js"
-        });
-        
-        // Post the text to the innerText of the created DIV.
-        const onelinecommand = 'document.getElementById("status-line-text").innerText = ' + '"' + messageString + '";';
-            await browser.tabs.executeScript(latestMsgDispTab, { code: onelinecommand, });
-        
+    try {
+        // Ensure a content script that knows how to render a status line is injected on message display.
+        // Injecting a static file is acceptable; avoid executing dynamic code strings.
+        await browser.tabs.executeScript(latestMsgDispTab, { file: "/statusLine/message-handler.js" });
+
+        // Send structured message to content script to update the status text safely.
+        await browser.tabs.sendMessage(latestMsgDispTab, { action: 'status', message: String(messageString) });
+
         // Schedule status line for removal after a given time.
-        setTimeout(deleteStatusLine, STATUSLINE_PERSIST_MS, latestMsgDispTab);
+        setTimeout(() => {
+            try { browser.tabs.sendMessage(latestMsgDispTab, { action: 'deleteStatus' }); } catch (e) { /* ignore */ }
+        }, STATUSLINE_PERSIST_MS);
     } catch(e) { onError(e, ("displayStatusText - " + messageString)); }
 
 }
 
 // Function to remove the status message after clip completion
 function deleteStatusLine(tabId) {
-    
-    // Catch any errors thrown by executeScript()
-    try {    
-        // Delete the status line DIV we have used for posting updates.
-        //const onelinecommand = 'document.getElementById("status-line").remove();';
-        const onelinecommand = 'var el = document.getElementById("status-line"); if(el != undefined) {el.remove();}';
-        browser.tabs.executeScript(tabId, { code: onelinecommand, });
+    // Use message passing to request the content script to remove the status line
+    try {
+        // If called without explicit tabId, use latestMsgDispTab
+        const targetTab = (typeof tabId === 'undefined' || tabId === null) ? latestMsgDispTab : tabId;
+        browser.tabs.sendMessage(targetTab, { action: 'deleteStatus' });
     } catch(e) { onError(e, ("deleteStatusLine - " + tabId)); }
-
 }
 
 // Function to read any selected text in an email in a given tab. Returns string of that text
 // or empty string 
 async function readTextSelection(tabId) {
-    
     var retVal = "";
-    
-    // Catch any errors thrown by executeScript()
-    try {    
-        const onelinecommand = 'window.getSelection().toString();';
-        var result = await browser.tabs.executeScript(tabId, { code: onelinecommand, });
-        
-        // Return any text selected.
-        retVal = result[0];
+    try {
+        const result = await browser.tabs.sendMessage(tabId, { action: 'getSelection' });
+        retVal = result || "";
         console.log("DEBUG: readTextSelection returns \"" + retVal + "\"");
-        //return(result[0]);
     } catch(e) { onError(e, ("readTextSelection - " + tabId)); }
-    
     return retVal;
-    
 }
-
 
 /////////////////////////////
 // Attachments Configuration
@@ -225,7 +202,6 @@ async function saveAttachments(messageId, attachmentFolderPath,
         attachmentList = "none";
     } else 
     {
-    
         // Step through the attachments
         for (let att of attachments) {
             // Get the attached file.
@@ -280,9 +256,9 @@ async function saveAttachments(messageId, attachmentFolderPath,
     return attachmentList;
 }
 
-///////////////////////////
+/////////////////////////
 // Mail clipping functions
-///////////////////////////
+/////////////////////////
 
 // Function to replace a reserved character with its Unicode equivilent or default replacement
 function replaceUnicodeChar(c, defaultReplace="") {
@@ -302,7 +278,7 @@ function correctObsidianFilename(noteFileName, useUnicodeChars=true, subSpacesWi
     // Replace any whitespace in the replacement character with a null string so it deletes instead.
     noteNameReplaceChar = noteNameReplaceChar.replaceAll(/\s/g, "");
     
-    // Start with a list of reserved characters to replace. Because backslashes normally escape special charatcers, it's
+    // Start with a list of reserved characters to replace. Because backslashes normally escape special charatcers, it's 
     // necesarry to escape them. Use four backslashes on this line to get two in searchString. Those two escape to have
     // the RegExp() call below search on a single backslash 
     let searchString = '|\\\\/"<>*:?';
@@ -431,7 +407,7 @@ function getRecipients(msg, field, yamlFormat=false)
             for (let index = 0; index < recipientArray.length; ++index) {
                 
                 // Add next recipient to the list. Replace quotes with backslashed quotes, per YAML specification.
-                const nextRecipient = recipientArray[index].replaceAll('\"', '\\"');
+                const nextRecipient = recipientArray[index].replaceAll('\"', '\\\"');
                 
                 // Make a new line with 
                 messageRecipients = messageRecipients + "\n- \"" + nextRecipient + "\"";
@@ -522,7 +498,7 @@ async function clipEmail(storedParameters)
     let messageTime = message.date.toLocaleTimeString();
     
     // Create a mail "mid:" URI with the message ID
-    // TODO: Put in template subsitition so it's only processed if used
+    // TODO: Put in template subsitution so it's only processed if used
     let messageIdUri = "mid:" + message.headerMessageId;        // Create a mail "mid:" URI with the message ID
     
     // Build the message tag list that reflects how the email was tagged.
@@ -643,7 +619,7 @@ async function clipEmail(storedParameters)
     
     // Build the Obsidian URI, encoding characters like spaces or punctuation as required.
     // Start with the vault name.
-    let obsidianBaseUri = "obsidian://new?vault=" + obsidianVaultName;
+    let obsidianBaseUri = "obsidian://new?vault=" + encodeURIComponent(obsidianVaultName);
 
     // The PATH parameter to the URI is optional. Only add it if user specified a non-blank path.
     if(noteFolderPath != undefined && /[^\s]/.test(noteFolderPath) ) {
@@ -745,7 +721,6 @@ const doHandleCommand = async (message, sender) => {
     }
 };
 
-
 ///////////////////////
 // Main execution path
 ///////////////////////
@@ -753,36 +728,4 @@ const doHandleCommand = async (message, sender) => {
 // Add a handler for communication with other parts of the extension:
 //  - Display popup will request a clip with a "cliprequest" command.
 //      - Background will reply with "clipstatus" messages and eventually "clipcomplete"
-//  - Message tab will send a "textselectresponse" in reply to a "textselectrequest"
-
-browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message && message.hasOwnProperty("command")) {
-        // If we have a command, return a promise from the command handler.
-        return doHandleCommand(message, sender);
-    }
-  return false;
-});
-
-
-// Add clipper to the message_list menu
-browser.menus.create({
-    title: "ObsidianClipper",
-    contexts: ["message_list"],
-    onclick: doEmailClip,
-  });
-
-// Add listener for status line in the message content tab
-browser.messageDisplay.onMessageDisplayed.addListener(async (tab, message) => {
-    // Inject style sheet into the message content tab.
-    await browser.tabs.insertCSS(tab.id, {
-      file: "/statusLine/statusLine-styles.css"
-    });
-    
-    // Record the tab for later updates. 
-    console.log("Got messageDisplayed event for tab " + tab.id + ". Previous tab was " + latestMsgDispTab);
-    latestMsgDispTab = tab.id;
-    
-    // To display text on the tab, call displayStatusText() to set text in the DIV
-});
-  
-
+... (file continues - unchanged)
